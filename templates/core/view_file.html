@@ -1,0 +1,951 @@
+{% extends 'base.html' %}
+
+{% block title %}View File - {{ file.file_title|default:file.file.name }}{% endblock %}
+
+{% block content %}
+<div class="file-viewer-container">
+    {% if error %}
+        <div class="error-message">
+            <h2>Error</h2>
+            <p>{{ error }}</p>
+                <a href="{% if user.is_staff or user.userprofile.status == 'admin' %}{% url 'files_view' %}{% else %}{% url 'user_files' %}{% endif %}" class="back-btn">Back to Files</a>
+        </div>
+    {% else %}
+        <div class="file-header">
+            <h1>{{ file.file_title|default:file.file.name }}</h1>
+            <div class="file-info">
+                <p><strong>Filename:</strong> {{ file.file.name|cut:"uploads/" }}</p>
+                <p><strong>Category:</strong> {{ file.get_file_category_display }}</p>
+                <p><strong>Size:</strong> {{ file.file.size|filesizeformat }}</p>
+                <p><strong>Uploaded:</strong> {{ file.uploaded_at|date:"F d, Y H:i A" }}</p>
+                <p><strong>Uploaded By:</strong> {{ file.user.username }}</p>
+            </div>
+            <div class="file-actions">
+                <a href="{% if user.is_staff or user.userprofile.status == 'admin' %}{% url 'files_view' %}{% else %}{% url 'user_files' %}{% endif %}" class="back-btn">Back to Files</a>
+                <a href="{{ file.file.url }}" download class="download-btn">Download</a>
+            </div>
+        </div>
+
+        <div class="file-content">
+            {% if file_type == 'data_table' %}
+                <div class="data-table-content">
+                    <div class="data-header">
+                        <h3>Data Preview</h3>
+                        <div class="data-stats">
+                            <span class="stat">Total Rows: {{ total_rows }}</span>
+                            <span class="stat">Filtered: {{ filtered_rows }}</span>
+                            <span class="stat">Displayed: {{ displayed_rows }}</span>
+                            <span class="stat">Columns: {{ columns|length }}</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Search and Controls -->
+                    <div class="data-controls">
+                        <div class="search-box">
+                            <input type="text" id="search-input" placeholder="Search in all columns..." value="{{ search_query }}" onkeypress="handleSearch(event)">
+                            <button onclick="performSearch()" class="search-btn">Search</button>
+                            {% if search_query %}
+                                <button onclick="clearSearch()" class="clear-search-btn">Clear</button>
+                            {% endif %}
+                        </div>
+                        
+                        <div class="pagination-controls">
+                            <select id="per-page-select" onchange="changePerPage()" aria-label="Items per page">
+                                <option value="25" {% if per_page == 25 %}selected{% endif %}>25 per page</option>
+                                <option value="50" {% if per_page == 50 %}selected{% endif %}>50 per page</option>
+                                <option value="100" {% if per_page == 100 %}selected{% endif %}>100 per page</option>
+                                <option value="200" {% if per_page == 200 %}selected{% endif %}>200 per page</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="table-wrapper">
+                        <table class="data-table" id="data-table">
+                            <thead>
+                                <tr>
+                                    {% for column in columns %}
+                                    <th class="resizable-column" data-column="{{ forloop.counter0 }}">
+                                        <div class="column-header">
+                                            <span class="column-title">{{ column }}</span>
+                                            <div class="resize-handle" data-column="{{ forloop.counter0 }}"></div>
+                                        </div>
+                                    </th>
+                                    {% endfor %}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for row in rows %}
+                                <tr>
+                                    {% for cell in row %}
+                                    <td class="resizable-cell" data-column="{{ forloop.counter0 }}">
+                                        {% if cell == '' or cell is None %}
+                                            <span class="empty-value">-</span>
+                                        {% elif cell.type == 'url' %}
+                                            <a href="{{ cell.full_url }}" target="_blank" class="url-link" title="{{ cell.full_url }}">
+                                                {{ cell.display }}
+                                                <i class="external-link-icon">🔗</i>
+                                            </a>
+                                        {% elif cell.type == 'long_text' %}
+                                            <span class="long-text" title="{{ cell.full_text }}">
+                                                {{ cell.display }}
+                                                <button class="expand-btn" onclick="toggleFullText(this)">Show More</button>
+                                            </span>
+                                        {% else %}
+                                            <span class="cell-content">{{ cell }}</span>
+                                        {% endif %}
+                                    </td>
+                                    {% endfor %}
+                                </tr>
+                                {% empty %}
+                                <tr>
+                                    <td colspan="{{ columns|length }}" class="no-data">No data available</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <!-- Pagination -->
+                    {% if total_pages > 1 %}
+                    <div class="pagination">
+                        <div class="pagination-info">
+                            Showing {{ displayed_rows }} of {{ filtered_rows }} rows (Page {{ current_page }} of {{ total_pages }})
+                        </div>
+                        
+                        <div class="pagination-buttons">
+                            {% if has_previous %}
+                                <a href="?page=1&per_page={{ per_page }}{% if search_query %}&search={{ search_query }}{% endif %}" class="page-btn">First</a>
+                                <a href="?page={{ previous_page }}&per_page={{ per_page }}{% if search_query %}&search={{ search_query }}{% endif %}" class="page-btn">Previous</a>
+                            {% endif %}
+                            
+                            {% for page_num in page_range %}
+                                {% if page_num == current_page %}
+                                    <span class="page-btn current">{{ page_num }}</span>
+                                {% elif page_num <= current_page|add:"2" and page_num >= current_page|add:"-2" %}
+                                    <a href="?page={{ page_num }}&per_page={{ per_page }}{% if search_query %}&search={{ search_query }}{% endif %}" class="page-btn">{{ page_num }}</a>
+                                {% endif %}
+                            {% endfor %}
+                            
+                            {% if has_next %}
+                                <a href="?page={{ next_page }}&per_page={{ per_page }}{% if search_query %}&search={{ search_query }}{% endif %}" class="page-btn">Next</a>
+                                <a href="?page={{ total_pages }}&per_page={{ per_page }}{% if search_query %}&search={{ search_query }}{% endif %}" class="page-btn">Last</a>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endif %}
+                    
+                    <div class="data-actions">
+                        <button onclick="exportToCSV()" class="export-btn">Export to CSV</button>
+                        <button onclick="copyTable()" class="copy-btn">Copy Table</button>
+                    </div>
+                </div>
+            {% elif file_type == 'json' %}
+                <div class="json-content">
+                    <h3>JSON Data</h3>
+                    <pre><code>{{ file_content }}</code></pre>
+                </div>
+            {% elif file_type == 'text' %}
+                <div class="text-content">
+                    <h3>File Content</h3>
+                    <pre><code>{{ file_content }}</code></pre>
+                </div>
+            {% elif file_type == 'image' %}
+                <div class="image-content">
+                    <h3>Image Preview</h3>
+                    <img src="{{ file.file.url }}" alt="{{ file.file_title|default:file.file.name }}" class="file-image">
+                </div>
+            {% elif file_type == 'pdf' %}
+                <div class="pdf-content">
+                    <h3>PDF File</h3>
+                    <p>{{ file_content }}</p>
+                    <iframe src="{{ file.file.url }}" width="100%" height="600px" class="pdf-viewer"></iframe>
+                </div>
+            {% elif file_type == 'error' %}
+                <div class="error-content">
+                    <h3>Error</h3>
+                    <p>{{ file_content }}</p>
+                </div>
+            {% elif file_type == 'other' %}
+                <div class="other-content">
+                    <h3>File Preview</h3>
+                    <p>{{ file_content }}</p>
+                </div>
+            {% else %}
+                <div class="unknown-content">
+                    <h3>Unknown File Type</h3>
+                    <p>This file type cannot be previewed. Please download to view.</p>
+                </div>
+            {% endif %}
+        </div>
+    {% endif %}
+</div>
+
+<style>
+.file-viewer-container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.file-header {
+    background: white;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.file-header h1 {
+    color: #333;
+    margin-bottom: 15px;
+    border-bottom: 2px solid #007bff;
+    padding-bottom: 10px;
+}
+
+.file-info {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.file-info p {
+    margin: 5px 0;
+    color: #666;
+}
+
+.file-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.back-btn, .download-btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 4px;
+    text-decoration: none;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background-color 0.3s;
+}
+
+.back-btn {
+    background: #6c757d;
+    color: white;
+}
+
+.back-btn:hover {
+    background: #5a6268;
+}
+
+.download-btn {
+    background: #007bff;
+    color: white;
+}
+
+.download-btn:hover {
+    background: #0056b3;
+}
+
+.file-content {
+    background: white;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.text-content pre {
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 4px;
+    padding: 15px;
+    overflow-x: auto;
+    max-height: 600px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.text-content code {
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+.image-content {
+    text-align: center;
+}
+
+.file-image {
+    max-width: 100%;
+    max-height: 600px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.pdf-content iframe {
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+.other-content, .unknown-content, .pdf-content {
+    text-align: center;
+    padding: 40px;
+}
+
+.other-content p, .unknown-content p, .pdf-content p {
+    font-size: 16px;
+    color: #666;
+    margin-bottom: 20px;
+}
+
+.error-message {
+    background: #f8d7da;
+    border: 1px solid #f5c6cb;
+    border-radius: 8px;
+    padding: 20px;
+    text-align: center;
+}
+
+.error-message h2 {
+    color: #721c24;
+    margin-bottom: 15px;
+}
+
+.error-message p {
+    color: #721c24;
+    margin-bottom: 20px;
+}
+
+h3 {
+    color: #333;
+    margin-bottom: 15px;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 5px;
+}
+
+/* Data Table Styles */
+.data-table-content {
+    width: 100%;
+}
+
+.data-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.data-stats {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+}
+
+.stat {
+    background: #f8f9fa;
+    padding: 5px 10px;
+    border-radius: 4px;
+    font-size: 14px;
+    color: #666;
+    border: 1px solid #e9ecef;
+}
+
+.data-warning {
+    background: #fff3cd;
+    border: 1px solid #ffeaa7;
+    border-radius: 4px;
+    padding: 10px;
+    margin-bottom: 15px;
+    color: #856404;
+}
+
+.table-wrapper {
+    overflow-x: auto;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+    min-width: 100%;
+}
+
+.data-table th {
+    background: #f8f9fa;
+    color: #333;
+    font-weight: 600;
+    padding: 12px 8px;
+    text-align: left;
+    border-bottom: 2px solid #dee2e6;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+/* Removed old td styles - using enhanced styles below */
+
+.data-table tr:hover {
+    background-color: #f5f5f5;
+}
+
+.data-table tr:nth-child(even) {
+    background-color: #fafafa;
+}
+
+.data-table tr:nth-child(even):hover {
+    background-color: #f0f0f0;
+}
+
+.null-value {
+    color: #999;
+    font-style: italic;
+}
+
+.no-data {
+    text-align: center;
+    color: #666;
+    font-style: italic;
+    padding: 20px;
+}
+
+.data-actions {
+    margin-top: 15px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.export-btn, .copy-btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background-color 0.3s;
+}
+
+.export-btn {
+    background: #28a745;
+    color: white;
+}
+
+.export-btn:hover {
+    background: #218838;
+}
+
+.copy-btn {
+    background: #17a2b8;
+    color: white;
+}
+
+.copy-btn:hover {
+    background: #138496;
+}
+
+.json-content pre {
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 4px;
+    padding: 15px;
+    overflow-x: auto;
+    max-height: 600px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.json-content code {
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+.error-content {
+    background: #f8d7da;
+    border: 1px solid #f5c6cb;
+    border-radius: 4px;
+    padding: 20px;
+    text-align: center;
+}
+
+.error-content h3 {
+    color: #721c24;
+    margin-bottom: 10px;
+}
+
+.error-content p {
+    color: #721c24;
+    margin: 0;
+}
+
+@media (max-width: 768px) {
+    .file-info {
+        grid-template-columns: 1fr;
+    }
+    
+    .file-actions {
+        flex-direction: column;
+    }
+    
+    .back-btn, .download-btn {
+        text-align: center;
+    }
+    
+    .data-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    
+    .data-stats {
+        justify-content: flex-start;
+    }
+    
+    .data-table td {
+        max-width: 150px;
+        font-size: 12px;
+    }
+    
+    .data-actions {
+        justify-content: center;
+    }
+}
+</style>
+
+<script>
+function exportToCSV() {
+    const table = document.querySelector('.data-table');
+    if (!table) return;
+    
+    const rows = Array.from(table.querySelectorAll('tr'));
+    const csvContent = rows.map(row => {
+        const cells = Array.from(row.querySelectorAll('th, td'));
+        return cells.map(cell => {
+            let text = cell.textContent.trim();
+            // Escape quotes and wrap in quotes if contains comma, quote, or newline
+            if (text.includes(',') || text.includes('"') || text.includes('\n')) {
+                text = '"' + text.replace(/"/g, '""') + '"';
+            }
+            return text;
+        }).join(',');
+    }).join('\n');
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', '{{ file.file_title|default:"data" }}.csv');
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+function copyTable() {
+    const table = document.querySelector('.data-table');
+    if (!table) return;
+    
+    const range = document.createRange();
+    range.selectNode(table);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    
+    try {
+        document.execCommand('copy');
+        alert('Table copied to clipboard!');
+    } catch (err) {
+        alert('Failed to copy table. Please try again.');
+    }
+    
+    window.getSelection().removeAllRanges();
+}
+
+// Add sorting functionality to table headers
+document.addEventListener('DOMContentLoaded', function() {
+    const table = document.querySelector('.data-table');
+    if (!table) return;
+    
+    const headers = table.querySelectorAll('th');
+    headers.forEach((header, index) => {
+        header.style.cursor = 'pointer';
+        header.addEventListener('click', () => sortTable(index));
+    });
+});
+
+function sortTable(columnIndex) {
+    const table = document.querySelector('.data-table');
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    
+    const isAscending = table.getAttribute('data-sort-direction') !== 'asc';
+    
+    rows.sort((a, b) => {
+        const aText = a.cells[columnIndex].textContent.trim();
+        const bText = b.cells[columnIndex].textContent.trim();
+        
+        // Try to parse as numbers
+        const aNum = parseFloat(aText);
+        const bNum = parseFloat(bText);
+        
+        if (!isNaN(aNum) && !isNaN(bNum)) {
+            return isAscending ? aNum - bNum : bNum - aNum;
+        }
+        
+        // Sort as strings
+        return isAscending ? aText.localeCompare(bText) : bText.localeCompare(aText);
+    });
+    
+    // Clear tbody and re-append sorted rows
+    tbody.innerHTML = '';
+    rows.forEach(row => tbody.appendChild(row));
+    
+    // Update sort direction
+    table.setAttribute('data-sort-direction', isAscending ? 'asc' : 'desc');
+    
+    // Update header styling
+    const headers = table.querySelectorAll('th');
+    headers.forEach((header, index) => {
+        header.classList.remove('sort-asc', 'sort-desc');
+        if (index === columnIndex) {
+            header.classList.add(isAscending ? 'sort-asc' : 'sort-desc');
+        }
+    });
+}
+
+function handleSearch(event) {
+    if (event.key === 'Enter') {
+        performSearch();
+    }
+}
+
+function performSearch() {
+    const searchInput = document.getElementById('search-input');
+    const searchQuery = searchInput.value.trim();
+    
+    // Build URL with search parameter
+    const url = new URL(window.location);
+    if (searchQuery) {
+        url.searchParams.set('search', searchQuery);
+    } else {
+        url.searchParams.delete('search');
+    }
+    url.searchParams.set('page', '1'); // Reset to first page when searching
+    
+    window.location.href = url.toString();
+}
+
+function clearSearch() {
+    const searchInput = document.getElementById('search-input');
+    searchInput.value = '';
+    
+    // Build URL without search parameter
+    const url = new URL(window.location);
+    url.searchParams.delete('search');
+    url.searchParams.set('page', '1'); // Reset to first page when clearing search
+    
+    window.location.href = url.toString();
+}
+
+function changePerPage() {
+    const perPageSelect = document.getElementById('per-page-select');
+    const perPage = perPageSelect.value;
+    
+    // Build URL with new per_page parameter
+    const url = new URL(window.location);
+    url.searchParams.set('per_page', perPage);
+    url.searchParams.set('page', '1'); // Reset to first page when changing per_page
+    
+    window.location.href = url.toString();
+}
+
+function toggleFullText(button) {
+    const longTextSpan = button.parentElement;
+    const fullText = longTextSpan.getAttribute('title');
+    const currentText = longTextSpan.querySelector('.text-display') || longTextSpan.childNodes[0];
+    
+    if (button.textContent === 'Show More') {
+        // Show full text
+        const textNode = longTextSpan.childNodes[0];
+        const displayText = document.createElement('span');
+        displayText.className = 'text-display';
+        displayText.textContent = fullText;
+        longTextSpan.replaceChild(displayText, textNode);
+        button.textContent = 'Show Less';
+        button.style.marginTop = '5px';
+    } else {
+        // Show truncated text
+        const textNode = longTextSpan.childNodes[0];
+        const displayText = document.createElement('span');
+        displayText.className = 'text-display';
+        displayText.textContent = fullText.substring(0, 97) + '...';
+        longTextSpan.replaceChild(displayText, textNode);
+        button.textContent = 'Show More';
+        button.style.marginTop = '0px';
+    }
+}
+</script>
+
+<style>
+.data-table th {
+    position: relative;
+}
+
+.data-table th:hover {
+    background-color: #e9ecef;
+}
+
+.data-table th.sort-asc::after {
+    content: ' ↑';
+    color: #007bff;
+}
+
+.data-table th.sort-desc::after {
+    content: ' ↓';
+    color: #007bff;
+}
+
+/* Pagination Styles */
+.pagination {
+    margin-top: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.pagination-info {
+    text-align: center;
+    color: #666;
+    font-size: 14px;
+}
+
+.pagination-buttons {
+    display: flex;
+    justify-content: center;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.page-btn {
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    background: white;
+    color: #333;
+    text-decoration: none;
+    border-radius: 4px;
+    font-size: 14px;
+    transition: all 0.3s;
+}
+
+.page-btn:hover {
+    background: #f8f9fa;
+    border-color: #007bff;
+}
+
+.page-btn.current {
+    background: #007bff;
+    color: white;
+    border-color: #007bff;
+}
+
+.page-btn.current:hover {
+    background: #0056b3;
+}
+
+/* Search and Controls Styles */
+.data-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+    gap: 15px;
+    flex-wrap: wrap;
+}
+
+.search-box {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex: 1;
+    min-width: 300px;
+}
+
+.search-box input {
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+    flex: 1;
+}
+
+.search-btn, .clear-search-btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background-color 0.3s;
+}
+
+.search-btn {
+    background: #007bff;
+    color: white;
+}
+
+.search-btn:hover {
+    background: #0056b3;
+}
+
+.clear-search-btn {
+    background: #6c757d;
+    color: white;
+}
+
+.clear-search-btn:hover {
+    background: #5a6268;
+}
+
+.pagination-controls select {
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+    background: white;
+}
+
+/* Enhanced Data Table Styles */
+.empty-value {
+    color: #999;
+    font-style: italic;
+}
+
+.url-link {
+    color: #007bff;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    word-break: break-all;
+    max-width: 100%;
+}
+
+.url-link:hover {
+    color: #0056b3;
+    text-decoration: underline;
+}
+
+.external-link-icon {
+    font-style: normal;
+    font-size: 12px;
+}
+
+.long-text {
+    position: relative;
+    display: block;
+}
+
+.expand-btn {
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 11px;
+    color: #6c757d;
+    cursor: pointer;
+    margin-left: 5px;
+    transition: all 0.2s;
+}
+
+.expand-btn:hover {
+    background: #e9ecef;
+    color: #495057;
+}
+
+.cell-content {
+    word-break: break-word;
+    line-height: 1.4;
+}
+
+/* Improved table cell styling */
+.data-table td {
+    padding: 12px 8px;
+    border-bottom: 1px solid #dee2e6;
+    vertical-align: top;
+    word-break: break-word;
+    max-width: 300px;
+    min-width: 100px;
+    position: relative;
+}
+
+.data-table th {
+    background: #f8f9fa;
+    color: #333;
+    font-weight: 600;
+    padding: 15px 8px;
+    text-align: left;
+    border-bottom: 2px solid #dee2e6;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    min-width: 120px;
+    max-width: 300px;
+}
+
+/* Better responsive design */
+.table-wrapper {
+    overflow-x: auto;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    max-height: 700px;
+    overflow-y: auto;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* Column header improvements */
+.column-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.column-title {
+    flex: 1;
+    font-weight: 600;
+    color: #333;
+    line-height: 1.3;
+}
+
+/* Tooltip for full content */
+.cell-content[title], .long-text[title] {
+    cursor: help;
+}
+
+/* Better mobile responsiveness */
+@media (max-width: 768px) {
+    .data-table th,
+    .data-table td {
+        padding: 8px 4px;
+        font-size: 12px;
+        max-width: 200px;
+    }
+    
+    .column-title {
+        font-size: 11px;
+    }
+    
+    .url-link {
+        font-size: 11px;
+    }
+    
+    .expand-btn {
+        padding: 1px 4px;
+        font-size: 10px;
+    }
+}
+</style>
+{% endblock %}

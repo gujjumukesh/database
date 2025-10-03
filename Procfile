@@ -1,0 +1,1 @@
+web: gunicorn data_visualization_project.wsgi:application

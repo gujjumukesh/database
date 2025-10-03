@@ -1,0 +1,63 @@
+{% extends 'base.html' %}
+
+{% block title %}User Dashboard{% endblock %}
+
+{% block content %}
+<div class="dashboard-container">
+    <h1>User Dashboard</h1>
+
+    <form method="GET" action="{% url 'user_dashboard_view' %}" class="filters-search">
+        <div class="filter-group">
+            <label for="date-filter">Date:</label>
+            <input type="date" id="date-filter" name="date_filter" value="{{ date_filter|default:'' }}">
+        </div>
+        <div class="filter-group">
+            <label for="time-filter">Time:</label>
+            <input type="time" id="time-filter" name="time_filter" value="{{ time_filter|default:'' }}">
+        </div>
+        <div class="filter-group">
+            <label for="category-filter">Category:</label>
+            <select id="category-filter" name="category_filter">
+                <option value="">All Categories</option>
+                {% for category_value, category_label in file_categories %}
+                <option value="{{ category_value }}" {% if category_value == category_filter %}selected{% endif %}>{{ category_label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="search-group">
+            <input type="text" id="search-input" name="search_query" placeholder="Search files..." value="{{ search_query|default:'' }}">
+            <button id="search-button" type="submit">Search</button>
+        </div>
+    </form>
+    </div>
+
+    <div class="file-table-container">
+        <table class="file-table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Time</th>
+                    <th>Category</th>
+                    <th>Filename</th>
+                    <th>Size</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for file in files %}
+                <tr>
+                    <td>{{ file.uploaded_at|date:"Y-m-d" }}</td>
+                    <td>{{ file.uploaded_at|date:"H:i A" }}</td>
+                    <td>{{ file.get_file_category_display }}</td>
+                    <td>{{ file.file.name|cut:"uploads/" }}</td>
+                    <td>{{ file.file.size|filesizeformat }}</td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="5">No files found.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
