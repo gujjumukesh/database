@@ -14,6 +14,13 @@ from .forms import BulkUploadForm, UserForm, UserProfileForm, FileUploadForm
 from .models import UploadedFile, ActivityLog, UserProfile, FileAccessLog
 from django.contrib.auth.models import User
 import datetime # Added for date/time filtering
+from django.conf import settings
+from supabase import create_client, Client
+import httpx # For fetching file content from URL
+from .supabase_storage import supabase_storage
+
+# Initialize Supabase client
+supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
 
 def register(request):
     if request.method == "POST":
@@ -564,16 +571,35 @@ def files_view(request):
     if request.method == "POST":
         form = FileUploadForm(request.POST, request.FILES)
         if form.is_valid():
-            uploaded_file = UploadedFile()
-            uploaded_file.user = request.user
-            uploaded_file.file = form.cleaned_data['file']
-            uploaded_file.file_title = form.cleaned_data['file_title']
-            uploaded_file.file_category = form.cleaned_data['file_category']
-            uploaded_file.save()
-            ActivityLog.objects.create(user=request.user, action=f"uploaded file: {uploaded_file.file.name}")
-            return redirect("files_view")
+            uploaded_file_instance = form.cleaned_data['file']
+            file_category = form.cleaned_data['file_category']
+            
+            try:
+                # Use our Supabase storage utility
+                result = supabase_storage.upload_file(
+                    uploaded_file_instance, 
+                    request.user.id,
+                    file_category
+                )
+                
+                # Create the UploadedFile record
+                uploaded_file = UploadedFile()
+                uploaded_file.user = request.user
+                uploaded_file.file = result['file_url']  # Store the public URL
+                uploaded_file.file_title = form.cleaned_data['file_title']
+                uploaded_file.file_type = result['file_type']
+                uploaded_file.file_category = file_category
+                uploaded_file.save()
+                
+                ActivityLog.objects.create(user=request.user, action=f"uploaded file to Supabase: {uploaded_file_instance.name}")
+                return redirect("files_view")
+            except Exception as e:
+                # Handle Supabase upload error
+                print(f"Supabase upload error: {e}")
+                form.add_error(None, f"Error uploading file to Supabase: {e}")
     else:
         form = FileUploadForm()
+
 
     # File filtering and search logic
     files = UploadedFile.objects.all().order_by('-uploaded_at')
@@ -684,10 +710,21 @@ def user_download(request, file_id):
     # Log access
     FileAccessLog.objects.create(user=request.user, file_path=uploaded_file.file.name)
 
-    # Serve file securely
-    file_handle = uploaded_file.file.open('rb')
-    response = FileResponse(file_handle, as_attachment=True, filename=uploaded_file.file.name.split('/')[-1])
-    return response
+    # Serve file securely from Supabase URL
+    try:
+        response_from_supabase = httpx.get(uploaded_file.file)
+        response_from_supabase.raise_for_status() # Raise an exception for 4xx or 5xx status codes
+        
+        file_content = response_from_supabase.content
+        file_name = uploaded_file.file.split('/')[-1] # Extract filename from URL
+        
+        response = HttpResponse(file_content, content_type=response_from_supabase.headers['content-type'])
+        response['Content-Disposition'] = f'attachment; filename="{file_name}"'
+        return response
+    except httpx.RequestError as e:
+        raise Http404(f"Error fetching file from Supabase: {e}")
+    except httpx.HTTPStatusError as e:
+        raise Http404(f"File not found or access denied on Supabase: {e}")
 
 @login_required
 def user_view_file(request, file_id):
@@ -703,9 +740,37 @@ def user_view_file(request, file_id):
     )
     if not (is_owner or is_admin_uploader):
         return HttpResponse("Forbidden", status=403)
+        
+    # Ensure the file URL is up-to-date
+    if not uploaded_file.file.startswith('http'):
+        # Extract file path from URL or use the file field directly
+        file_path = uploaded_file.file.split('/')[-1] if '/' in uploaded_file.file else uploaded_file.file
+        # Update the URL using our Supabase storage utility
+        uploaded_file.file = supabase_storage.get_file_url(file_path)
+        uploaded_file.save()
+        
+    # Get file content from Supabase if needed
+    file_content = None
+    if uploaded_file.file.startswith(settings.SUPABASE_URL):
+        try:
+            # Extract bucket name and path from URL if possible
+            if '/storage/v1/object/public/' in uploaded_file.file:
+                parts = uploaded_file.file.split('/storage/v1/object/public/')[1].split('/', 1)
+                bucket_name = parts[0]
+                file_path = parts[1] if len(parts) > 1 else ''
+                # Use supabase_storage utility to get file content
+                file_bytes = supabase_storage.get_file_content(file_path, bucket_name)
+            else:
+                # Fallback to direct HTTP request
+                response = httpx.get(uploaded_file.file)
+                response.raise_for_status()
+                file_bytes = io.BytesIO(response.content)
+        except Exception as e:
+            print(f"Error fetching file from Supabase: {e}")
+            # Will continue with regular processing
 
     # Log file access
-    FileAccessLog.objects.create(user=request.user, file_path=uploaded_file.file.name)
+    FileAccessLog.objects.create(user=request.user, file_path=uploaded_file.file)
 
     # Reuse same rendering logic as admin view, but without admin-only restriction
     page = int(request.GET.get('page', 1))
@@ -723,75 +788,86 @@ def user_view_file(request, file_id):
     total_pages = 0
 
     try:
-        if file_extension in ['csv']:
-            import pandas as pd
-            df = pd.read_csv(uploaded_file.file)
-            file_type = 'data_table'
-            columns = []
-            for col in df.columns.tolist():
-                clean_col = str(col).strip().replace('_', ' ').title()
-                columns.append(clean_col)
-            total_rows = len(df)
-            if search_query:
-                mask = df.astype(str).apply(lambda x: x.str.contains(search_query, case=False, na=False)).any(axis=1)
-                df = df[mask]
-                filtered_rows = len(df)
-            else:
-                filtered_rows = total_rows
-            total_pages = (filtered_rows + per_page - 1) // per_page
-            start_idx = (page - 1) * per_page
-            end_idx = start_idx + per_page
-            rows = []
-            for _, row in df.iloc[start_idx:end_idx].iterrows():
-                formatted_row = []
-                for value in row:
-                    if getattr(pd, 'isna')(value) or str(value).lower() in ['nan', 'none', 'null']:
-                        formatted_row.append('')
-                    else:
-                        formatted_row.append(str(value))
-                rows.append(formatted_row)
-        elif file_extension in ['xlsx', 'xls']:
-            import pandas as pd
-            df = pd.read_excel(uploaded_file.file)
-            file_type = 'data_table'
-            columns = [str(col).strip().replace('_', ' ').title() for col in df.columns.tolist()]
-            total_rows = len(df)
-            if search_query:
-                mask = df.astype(str).apply(lambda x: x.str.contains(search_query, case=False, na=False)).any(axis=1)
-                df = df[mask]
-                filtered_rows = len(df)
-            else:
-                filtered_rows = total_rows
-            total_pages = (filtered_rows + per_page - 1) // per_page
-            start_idx = (page - 1) * per_page
-            end_idx = start_idx + per_page
-            rows = []
-            for _, row in df.iloc[start_idx:end_idx].iterrows():
-                rows.append([str(value) if value is not None else '' for value in row])
-        elif file_extension in ['json']:
-            import json
-            with uploaded_file.file.open('r') as f:
-                data = json.load(f)
-                file_type = 'json'
-                file_content = json.dumps(data, indent=2)
-        elif file_extension in ['txt', 'xml', 'html', 'css', 'js', 'py', 'md']:
+        if file_extension in ['csv', 'xlsx', 'xls', 'json', 'txt', 'xml', 'html', 'css', 'js', 'py', 'md', 'pdf']:
+            # Fetch file content from Supabase URL
             try:
-                with uploaded_file.file.open('r', encoding='utf-8') as f:
-                    file_content = f.read()
-                file_type = 'text'
-            except Exception:
-                try:
-                    with uploaded_file.file.open('r', encoding='latin-1') as f:
-                        file_content = f.read()
-                    file_type = 'text'
-                except Exception:
-                    file_content = "Unable to read file content"
-                    file_type = 'error'
+                response_from_supabase = httpx.get(uploaded_file.file)
+                response_from_supabase.raise_for_status()
+                file_bytes = io.BytesIO(response_from_supabase.content)
+            except httpx.RequestError as e:
+                file_type = 'error'
+                file_content = f"Error fetching file from Supabase: {e}"
+            except httpx.HTTPStatusError as e:
+                file_type = 'error'
+                file_content = f"File not found or access denied on Supabase: {e}"
+            
+            if file_type != 'error': # Only proceed if file fetch was successful
+                if file_extension == 'csv':
+                    import pandas as pd
+                    df = pd.read_csv(file_bytes)
+                    file_type = 'data_table'
+                    columns = []
+                    for col in df.columns.tolist():
+                        clean_col = str(col).strip().replace('_', ' ').title()
+                        columns.append(clean_col)
+                    total_rows = len(df)
+                    if search_query:
+                        mask = df.astype(str).apply(lambda x: x.str.contains(search_query, case=False, na=False)).any(axis=1)
+                        df = df[mask]
+                        filtered_rows = len(df)
+                    else:
+                        filtered_rows = total_rows
+                    total_pages = (filtered_rows + per_page - 1) // per_page
+                    start_idx = (page - 1) * per_page
+                    end_idx = start_idx + per_page
+                    rows = []
+                    for _, row in df.iloc[start_idx:end_idx].iterrows():
+                        formatted_row = []
+                        for value in row:
+                            if getattr(pd, 'isna')(value) or str(value).lower() in ['nan', 'none', 'null']:
+                                formatted_row.append('')
+                            else:
+                                formatted_row.append(str(value))
+                        rows.append(formatted_row)
+                elif file_extension in ['xlsx', 'xls']:
+                    import pandas as pd
+                    df = pd.read_excel(file_bytes)
+                    file_type = 'data_table'
+                    columns = [str(col).strip().replace('_', ' ').title() for col in df.columns.tolist()]
+                    total_rows = len(df)
+                    if search_query:
+                        mask = df.astype(str).apply(lambda x: x.str.contains(search_query, case=False, na=False)).any(axis=1)
+                        df = df[mask]
+                        filtered_rows = len(df)
+                    else:
+                        filtered_rows = total_rows
+                    total_pages = (filtered_rows + per_page - 1) // per_page
+                    start_idx = (page - 1) * per_page
+                    end_idx = start_idx + per_page
+                    rows = []
+                    for _, row in df.iloc[start_idx:end_idx].iterrows():
+                        rows.append([str(value) if value is not None else '' for value in row])
+                elif file_extension == 'json':
+                    import json
+                    data = json.load(file_bytes)
+                    file_type = 'json'
+                    file_content = json.dumps(data, indent=2)
+                elif file_extension in ['txt', 'xml', 'html', 'css', 'js', 'py', 'md']:
+                    try:
+                        file_content = file_bytes.getvalue().decode('utf-8')
+                        file_type = 'text'
+                    except Exception:
+                        try:
+                            file_content = file_bytes.getvalue().decode('latin-1')
+                            file_type = 'text'
+                        except Exception:
+                            file_content = "Unable to read file content"
+                            file_type = 'error'
+                elif file_extension == 'pdf':
+                    file_type = 'pdf'
+                    file_content = "PDF files cannot be displayed directly in the browser. Please download to view."
         elif file_extension in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg']:
             file_type = 'image'
-        elif file_extension in ['pdf']:
-            file_type = 'pdf'
-            file_content = "PDF files cannot be displayed directly in the browser. Please download to view."
         else:
             file_type = 'other'
             file_content = f"This file type (.{file_extension}) cannot be displayed. Please download to view."
@@ -824,13 +900,13 @@ def user_view_file(request, file_id):
     return render(request, "core/view_file.html", context)
 
 @login_required
-@user_passes_test(is_admin) # This decorator should remain for admin-only view_file
+@user_passes_test(is_admin)
 def view_file(request, file_id):
     try:
         uploaded_file = UploadedFile.objects.get(id=file_id)
         
         # Log file access
-        FileAccessLog.objects.create(user=request.user, file_path=uploaded_file.file.name)
+        FileAccessLog.objects.create(user=request.user, file_path=uploaded_file.file)
         
         # Get pagination parameters
         page = int(request.GET.get('page', 1))
@@ -838,7 +914,7 @@ def view_file(request, file_id):
         search_query = request.GET.get('search', '')
         
         # Determine file type and prepare content for viewing
-        file_extension = uploaded_file.file.name.split('.')[-1].lower()
+        file_extension = uploaded_file.file_type # Use file_type from model
         file_content = None
         file_type = 'unknown'
         data_table = None
@@ -848,196 +924,188 @@ def view_file(request, file_id):
         filtered_rows = 0
         total_pages = 0
         
-        if file_extension in ['csv']:
-            # CSV files - display as data table
+        if file_extension in ['csv', 'xlsx', 'xls', 'json', 'txt', 'xml', 'html', 'css', 'js', 'py', 'md', 'pdf']:
+            # Fetch file content from Supabase URL
             try:
-                df = pd.read_csv(uploaded_file.file)
-                file_type = 'data_table'
-                
-                # Clean and format column names
-                columns = []
-                for col in df.columns.tolist():
-                    # Clean column names - remove special characters and make readable
-                    clean_col = str(col).strip()
-                    if clean_col.startswith('C-'):
-                        clean_col = clean_col.replace('C-', 'Candidate ').replace('_', ' ').title()
-                    elif clean_col.startswith('opd-'):
-                        clean_col = clean_col.replace('opd-', '').replace('_', ' ').title()
-                    elif clean_col.startswith('dropdown-'):
-                        clean_col = clean_col.replace('dropdown-', '').replace('_', ' ').title()
-                    elif clean_col.startswith('icon-'):
-                        clean_col = clean_col.replace('icon-', '').replace('_', ' ').title()
-                    elif clean_col.startswith('origin-'):
-                        clean_col = clean_col.replace('origin-', '').replace('_', ' ').title()
+                response_from_supabase = httpx.get(uploaded_file.file)
+                response_from_supabase.raise_for_status()
+                file_bytes = io.BytesIO(response_from_supabase.content)
+            except httpx.RequestError as e:
+                file_type = 'error'
+                file_content = f"Error fetching file from Supabase: {e}"
+            except httpx.HTTPStatusError as e:
+                file_type = 'error'
+                file_content = f"File not found or access denied on Supabase: {e}"
+            
+            if file_type != 'error': # Only proceed if file fetch was successful
+                if file_extension == 'csv':
+                    import pandas as pd
+                    df = pd.read_csv(file_bytes)
+                    file_type = 'data_table'
+                    
+                    # Clean and format column names
+                    columns = []
+                    for col in df.columns.tolist():
+                        # Clean column names - remove special characters and make readable
+                        clean_col = str(col).strip()
+                        if clean_col.startswith('C-'):
+                            clean_col = clean_col.replace('C-', 'Candidate ').replace('_', ' ').title()
+                        elif clean_col.startswith('opd-'):
+                            clean_col = clean_col.replace('opd-', '').replace('_', ' ').title()
+                        elif clean_col.startswith('dropdown-'):
+                            clean_col = clean_col.replace('dropdown-', '').replace('_', ' ').title()
+                        elif clean_col.startswith('icon-'):
+                            clean_col = clean_col.replace('icon-', '').replace('_', ' ').title()
+                        elif clean_col.startswith('origin-'):
+                            clean_col = clean_col.replace('origin-', '').replace('_', ' ').title()
+                        else:
+                            clean_col = clean_col.replace('_', ' ').title()
+                        columns.append(clean_col)
+                    
+                    total_rows = len(df)
+                    
+                    # Apply search filter if provided
+                    if search_query:
+                        mask = df.astype(str).apply(lambda x: x.str.contains(search_query, case=False, na=False)).any(axis=1)
+                        df = df[mask]
+                        filtered_rows = len(df)
                     else:
-                        clean_col = clean_col.replace('_', ' ').title()
-                    columns.append(clean_col)
-                
-                total_rows = len(df)
-                
-                # Apply search filter if provided
-                if search_query:
-                    mask = df.astype(str).apply(lambda x: x.str.contains(search_query, case=False, na=False)).any(axis=1)
-                    df = df[mask]
-                    filtered_rows = len(df)
-                else:
-                    filtered_rows = total_rows
-                
-                # Calculate pagination
-                total_pages = (filtered_rows + per_page - 1) // per_page
-                start_idx = (page - 1) * per_page
-                end_idx = start_idx + per_page
-                
-                # Get paginated data and format it
-                rows = []
-                for _, row in df.iloc[start_idx:end_idx].iterrows():
-                    formatted_row = []
-                    for value in row:
-                        if pd.isna(value) or str(value).lower() in ['nan', 'none', 'null']:
-                            formatted_row.append('')
-                        elif isinstance(value, str) and value.startswith('http'):
-                            # Handle URLs - truncate for display but keep full URL
-                            if len(value) > 50:
+                        filtered_rows = total_rows
+                    
+                    # Calculate pagination
+                    total_pages = (filtered_rows + per_page - 1) // per_page
+                    start_idx = (page - 1) * per_page
+                    end_idx = start_idx + per_page
+                    
+                    # Get paginated data and format it
+                    rows = []
+                    for _, row in df.iloc[start_idx:end_idx].iterrows():
+                        formatted_row = []
+                        for value in row:
+                            if pd.isna(value) or str(value).lower() in ['nan', 'none', 'null']:
+                                formatted_row.append('')
+                            elif isinstance(value, str) and value.startswith('http'):
+                                # Handle URLs - truncate for display but keep full URL
+                                if len(value) > 50:
+                                    formatted_row.append({
+                                        'type': 'url',
+                                        'display': value[:47] + '...',
+                                        'full_url': value
+                                    })
+                                else:
+                                    formatted_row.append({
+                                        'type': 'url',
+                                        'display': value,
+                                        'full_url': value
+                                    })
+                            elif isinstance(value, str) and len(value) > 100:
+                                # Truncate very long text
                                 formatted_row.append({
-                                    'type': 'url',
-                                    'display': value[:47] + '...',
-                                    'full_url': value
+                                    'type': 'long_text',
+                                    'display': value[:97] + '...',
+                                    'full_text': value
                                 })
                             else:
-                                formatted_row.append({
-                                    'type': 'url',
-                                    'display': value,
-                                    'full_url': value
-                                })
-                        elif isinstance(value, str) and len(value) > 100:
-                            # Truncate very long text
-                            formatted_row.append({
-                                'type': 'long_text',
-                                'display': value[:97] + '...',
-                                'full_text': value
-                            })
+                                formatted_row.append(str(value))
+                        rows.append(formatted_row)
+                    
+                elif file_extension in ['xlsx', 'xls']:
+                    import pandas as pd
+                    df = pd.read_excel(file_bytes)
+                    file_type = 'data_table'
+                    
+                    # Clean and format column names
+                    columns = []
+                    for col in df.columns.tolist():
+                        # Clean column names - remove special characters and make readable
+                        clean_col = str(col).strip()
+                        if clean_col.startswith('C-'):
+                            clean_col = clean_col.replace('C-', 'Candidate ').replace('_', ' ').title()
+                        elif clean_col.startswith('opd-'):
+                            clean_col = clean_col.replace('opd-', '').replace('_', ' ').title()
+                        elif clean_col.startswith('dropdown-'):
+                            clean_col = clean_col.replace('dropdown-', '').replace('_', ' ').title()
+                        elif clean_col.startswith('icon-'):
+                            clean_col = clean_col.replace('icon-', '').replace('_', ' ').title()
+                        elif clean_col.startswith('origin-'):
+                            clean_col = clean_col.replace('origin-', '').replace('_', ' ').title()
                         else:
-                            formatted_row.append(str(value))
-                    rows.append(formatted_row)
-                
-            except Exception as e:
-                file_type = 'error'
-                file_content = f"Error reading CSV file: {str(e)}"
-                
-        elif file_extension in ['xlsx', 'xls']:
-            # Excel files - display as data table
-            try:
-                df = pd.read_excel(uploaded_file.file)
-                file_type = 'data_table'
-                
-                # Clean and format column names
-                columns = []
-                for col in df.columns.tolist():
-                    # Clean column names - remove special characters and make readable
-                    clean_col = str(col).strip()
-                    if clean_col.startswith('C-'):
-                        clean_col = clean_col.replace('C-', 'Candidate ').replace('_', ' ').title()
-                    elif clean_col.startswith('opd-'):
-                        clean_col = clean_col.replace('opd-', '').replace('_', ' ').title()
-                    elif clean_col.startswith('dropdown-'):
-                        clean_col = clean_col.replace('dropdown-', '').replace('_', ' ').title()
-                    elif clean_col.startswith('icon-'):
-                        clean_col = clean_col.replace('icon-', '').replace('_', ' ').title()
-                    elif clean_col.startswith('origin-'):
-                        clean_col = clean_col.replace('origin-', '').replace('_', ' ').title()
+                            clean_col = clean_col.replace('_', ' ').title()
+                        columns.append(clean_col)
+                    
+                    total_rows = len(df)
+                    
+                    # Apply search filter if provided
+                    if search_query:
+                        mask = df.astype(str).apply(lambda x: x.str.contains(search_query, case=False, na=False)).any(axis=1)
+                        df = df[mask]
+                        filtered_rows = len(df)
                     else:
-                        clean_col = clean_col.replace('_', ' ').title()
-                    columns.append(clean_col)
-                
-                total_rows = len(df)
-                
-                # Apply search filter if provided
-                if search_query:
-                    mask = df.astype(str).apply(lambda x: x.str.contains(search_query, case=False, na=False)).any(axis=1)
-                    df = df[mask]
-                    filtered_rows = len(df)
-                else:
-                    filtered_rows = total_rows
-                
-                # Calculate pagination
-                total_pages = (filtered_rows + per_page - 1) // per_page
-                start_idx = (page - 1) * per_page
-                end_idx = start_idx + per_page
-                
-                # Get paginated data and format it
-                rows = []
-                for _, row in df.iloc[start_idx:end_idx].iterrows():
-                    formatted_row = []
-                    for value in row:
-                        if pd.isna(value) or str(value).lower() in ['nan', 'none', 'null']:
-                            formatted_row.append('')
-                        elif isinstance(value, str) and value.startswith('http'):
-                            # Handle URLs - truncate for display but keep full URL
-                            if len(value) > 50:
+                        filtered_rows = total_rows
+                    
+                    # Calculate pagination
+                    total_pages = (filtered_rows + per_page - 1) // per_page
+                    start_idx = (page - 1) * per_page
+                    end_idx = start_idx + per_page
+                    
+                    # Get paginated data and format it
+                    rows = []
+                    for _, row in df.iloc[start_idx:end_idx].iterrows():
+                        formatted_row = []
+                        for value in row:
+                            if pd.isna(value) or str(value).lower() in ['nan', 'none', 'null']:
+                                formatted_row.append('')
+                            elif isinstance(value, str) and value.startswith('http'):
+                                # Handle URLs - truncate for display but keep full URL
+                                if len(value) > 50:
+                                    formatted_row.append({
+                                        'type': 'url',
+                                        'display': value[:47] + '...',
+                                        'full_url': value
+                                    })
+                                else:
+                                    formatted_row.append({
+                                        'type': 'url',
+                                        'display': value,
+                                        'full_url': value
+                                    })
+                            elif isinstance(value, str) and len(value) > 100:
+                                # Truncate very long text
                                 formatted_row.append({
-                                    'type': 'url',
-                                    'display': value[:47] + '...',
-                                    'full_url': value
+                                    'type': 'long_text',
+                                    'display': value[:97] + '...',
+                                    'full_text': value
                                 })
                             else:
-                                formatted_row.append({
-                                    'type': 'url',
-                                    'display': value,
-                                    'full_url': value
-                                })
-                        elif isinstance(value, str) and len(value) > 100:
-                            # Truncate very long text
-                            formatted_row.append({
-                                'type': 'long_text',
-                                'display': value[:97] + '...',
-                                'full_text': value
-                            })
-                        else:
-                            formatted_row.append(str(value))
-                    rows.append(formatted_row)
-                
-            except Exception as e:
-                file_type = 'error'
-                file_content = f"Error reading Excel file: {str(e)}"
-                
-        elif file_extension in ['json']:
-            # JSON files - display as formatted data
-            try:
-                with uploaded_file.file.open('r') as f:
+                                formatted_row.append(str(value))
+                        rows.append(formatted_row)
+                    
+                except Exception as e:
+                    file_type = 'error'
+                    file_content = f"Error reading Excel file: {str(e)}"
+                    
+                elif file_extension == 'json':
                     import json
-                    data = json.load(f)
+                    data = json.load(file_bytes)
                     file_type = 'json'
                     file_content = json.dumps(data, indent=2)
-            except Exception as e:
-                file_type = 'error'
-                file_content = f"Error reading JSON file: {str(e)}"
-                
-        elif file_extension in ['txt', 'xml', 'html', 'css', 'js', 'py', 'md']:
-            # Text-based files
-            try:
-                with uploaded_file.file.open('r', encoding='utf-8') as f:
-                    file_content = f.read()
-                file_type = 'text'
-            except:
-                try:
-                    with uploaded_file.file.open('r', encoding='latin-1') as f:
-                        file_content = f.read()
-                    file_type = 'text'
-                except:
-                    file_content = "Unable to read file content"
-                    file_type = 'error'
-                
+                elif file_extension in ['txt', 'xml', 'html', 'css', 'js', 'py', 'md']:
+                    try:
+                        file_content = file_bytes.getvalue().decode('utf-8')
+                        file_type = 'text'
+                    except Exception:
+                        try:
+                            file_content = file_bytes.getvalue().decode('latin-1')
+                            file_type = 'text'
+                        except Exception:
+                            file_content = "Unable to read file content"
+                            file_type = 'error'
+                elif file_extension == 'pdf':
+                    file_type = 'pdf'
+                    file_content = "PDF files cannot be displayed directly in the browser. Please download to view."
         elif file_extension in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg']:
-            # Image files
             file_type = 'image'
-            
-        elif file_extension in ['pdf']:
-            # PDF files
-            file_type = 'pdf'
-            file_content = "PDF files cannot be displayed directly in the browser. Please download to view."
-            
         else:
-            # Other file types
             file_type = 'other'
             file_content = f"This file type (.{file_extension}) cannot be displayed in the browser. Please download to view."
         

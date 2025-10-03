@@ -6,6 +6,36 @@
 <div class="files-container">
     <h1>My Files</h1>
     
+    <!-- Upload Section -->
+    <div class="upload-section">
+        <h2>Upload New File</h2>
+        <form method="POST" enctype="multipart/form-data" class="upload-form">
+            {% csrf_token %}
+            <div class="form-group">
+                <label for="id_file">Select File:</label>
+                {{ form.file }}
+            </div>
+            <div class="form-group">
+                <label for="id_file_title">File Title:</label>
+                {{ form.file_title }}
+            </div>
+            <div class="form-group">
+                <label for="id_file_category">File Category:</label>
+                {{ form.file_category }}
+            </div>
+            <div class="form-group">
+                <button type="submit" class="upload-btn">Upload File</button>
+            </div>
+            {% if form.non_field_errors %}
+            <div class="error-message">
+                {% for error in form.non_field_errors %}
+                    {{ error }}
+                {% endfor %}
+            </div>
+            {% endif %}
+        </form>
+    </div>
+    
     <!-- Filters Section -->
     <div class="filters-section">
         <h2>Filter Files</h2>
@@ -63,7 +93,6 @@
                         <th>Title</th>
                         <th>Filename</th>
                         <th>Category</th>
-                        <th>Size</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -73,9 +102,8 @@
                         <td>{{ file.uploaded_at|date:"Y-m-d" }}</td>
                         <td>{{ file.uploaded_at|date:"H:i A" }}</td>
                         <td>{{ file.file_title|default:"N/A" }}</td>
-                        <td>{{ file.file.name|cut:"uploads/" }}</td>
+                        <td>{{ file.file|cut:file.file.rsplit('/', 1).0|cut:"/" }}</td> {# Extract filename from URL #}
                         <td>{{ file.get_file_category_display }}</td>
-                        <td>{{ file.file.size|filesizeformat }}</td>
                         <td>
                             <a href="{% if user.is_staff %}{% url 'view_file' file.id %}{% else %}{% url 'user_view_file' file.id %}{% endif %}" class="action-link">View</a>
                             <a href="{% url 'user_download' file.id %}" class="action-link">Download</a>
@@ -83,7 +111,7 @@
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="7">No files found.</td>
+                        <td colspan="6">No files found.</td> {# Adjusted colspan #}
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -99,12 +127,51 @@
     padding: 20px;
 }
 
-.filters-section, .files-table-section {
+.upload-section, .filters-section, .files-table-section {
     background: white;
     border-radius: 8px;
     padding: 20px;
     margin-bottom: 20px;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.upload-form {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: 500;
+}
+
+.upload-btn {
+    background-color: #4CAF50;
+    color: white;
+    padding: 10px 15px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+}
+
+.upload-btn:hover {
+    background-color: #45a049;
+}
+
+.error-message {
+    color: #f44336;
+    padding: 10px;
+    margin-top: 10px;
+    border: 1px solid #f44336;
+    border-radius: 4px;
+    background-color: #ffebee;
 }
 
 .filters-form {

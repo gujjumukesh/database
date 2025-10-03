@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 
-{% block title %}View File - {{ file.file_title|default:file.file.name }}{% endblock %}
+{% block title %}View File - {{ file.file_title|default:file.file|cut:file.file.rsplit('/', 1).0|cut:"/" }}{% endblock %}
 
 {% block content %}
 <div class="file-viewer-container">
@@ -12,17 +12,17 @@
         </div>
     {% else %}
         <div class="file-header">
-            <h1>{{ file.file_title|default:file.file.name }}</h1>
+            <h1>{{ file.file_title|default:file.file|cut:file.file.rsplit('/', 1).0|cut:"/" }}</h1>
             <div class="file-info">
-                <p><strong>Filename:</strong> {{ file.file.name|cut:"uploads/" }}</p>
+                <p><strong>Filename:</strong> {{ file.file|cut:file.file.rsplit('/', 1).0|cut:"/" }}</p>
                 <p><strong>Category:</strong> {{ file.get_file_category_display }}</p>
-                <p><strong>Size:</strong> {{ file.file.size|filesizeformat }}</p>
+                {# Removed Size as it's not directly available from Supabase URL #}
                 <p><strong>Uploaded:</strong> {{ file.uploaded_at|date:"F d, Y H:i A" }}</p>
                 <p><strong>Uploaded By:</strong> {{ file.user.username }}</p>
             </div>
             <div class="file-actions">
                 <a href="{% if user.is_staff or user.userprofile.status == 'admin' %}{% url 'files_view' %}{% else %}{% url 'user_files' %}{% endif %}" class="back-btn">Back to Files</a>
-                <a href="{{ file.file.url }}" download class="download-btn">Download</a>
+                <a href="{{ file.file }}" download class="download-btn">Download</a> {# Use file.file directly as it's the URL #}
             </div>
         </div>
 
@@ -152,13 +152,13 @@
             {% elif file_type == 'image' %}
                 <div class="image-content">
                     <h3>Image Preview</h3>
-                    <img src="{{ file.file.url }}" alt="{{ file.file_title|default:file.file.name }}" class="file-image">
+                    <img src="{{ file.file }}" alt="{{ file.file_title|default:file.file|cut:file.file.rsplit('/', 1).0|cut:"/" }}" class="file-image"> {# Use file.file directly as it's the URL #}
                 </div>
             {% elif file_type == 'pdf' %}
                 <div class="pdf-content">
                     <h3>PDF File</h3>
                     <p>{{ file_content }}</p>
-                    <iframe src="{{ file.file.url }}" width="100%" height="600px" class="pdf-viewer"></iframe>
+                    <iframe src="{{ file.file }}" width="100%" height="600px" class="pdf-viewer"></iframe> {# Use file.file directly as it's the URL #}
                 </div>
             {% elif file_type == 'error' %}
                 <div class="error-content">

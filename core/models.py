@@ -3,7 +3,7 @@ from django.contrib.auth.models import User
 
 class UploadedFile(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
-    file = models.FileField(upload_to="uploads/")
+    file = models.CharField(max_length=500) # Stores the URL to the Supabase file
     file_title = models.CharField(max_length=200, blank=True, null=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
     file_type = models.CharField(max_length=10, blank=True, null=True) # e.g., 'csv', 'pdf', 'excel'

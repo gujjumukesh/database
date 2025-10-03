@@ -15,6 +15,12 @@ services:
         fromDatabase:
           name: rabush-db
           property: connectionString
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: "file-uploads"
 
 databases:
   - name: rabush-db
